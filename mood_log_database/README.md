@@ -66,15 +66,16 @@ The startup script writes a connection helper to `db_connection.txt` and generat
 
 ## Migrations
 
-- 001_init.sql: creates tables and extensions (citext, pgcrypto) when permitted, plus schema_migrations table.
-- 002_indexes.sql: adds useful indexes `users_email_idx` and `moods_user_date_idx`.
+- 000_extensions.sql: attempts to create extensions (citext, pgcrypto) safely and idempotently; logs notices if not permitted.
+- 001_init.sql: creates tables, using CITEXT for users.email when available; otherwise uses TEXT and enforces uniqueness via a unique index on LOWER(email). Also tolerates missing gen_random_uuid().
+- 002_indexes.sql: adds useful indexes; adapts based on whether CITEXT is available.
 
 Migrations are tracked in `schema_migrations` to ensure idempotency.
 
 ## Notes
 
-- If pgcrypto or citext extensions cannot be created due to permissions, notices are logged; the application will still function (email uniqueness remains but may be case-sensitive if citext is unavailable).
-- UUID defaults rely on pgcrypto's gen_random_uuid(). If unavailable, the application/seed uses explicit gen_random_uuid() calls; if the function is missing it will log a notice. For production, ensure `CREATE EXTENSION pgcrypto;`.
+- If pgcrypto or citext extensions cannot be created due to permissions, notices are logged; the application will still function. Email uniqueness remains enforced and case-insensitive via LOWER(email) unique index if citext is unavailable.
+- UUID defaults rely on pgcrypto's gen_random_uuid(). If unavailable, table DDL falls back to requiring UUIDs to be supplied by the application/seed.
 
 ## Useful Commands
 

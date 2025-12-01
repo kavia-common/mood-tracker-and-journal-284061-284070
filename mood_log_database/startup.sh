@@ -108,8 +108,31 @@ echo "Applying migrations..."
 MIGRATIONS_DIR="migrations"
 APPLIED_COUNT=0
 if [ -d "${MIGRATIONS_DIR}" ]; then
+  # Ensure schema_migrations exists
+  ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS schema_migrations (id SERIAL PRIMARY KEY, filename TEXT UNIQUE NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"
+
+  # First, apply 000_extensions.sql if present
+  if [ -f "${MIGRATIONS_DIR}/000_extensions.sql" ]; then
+    FILENAME="000_extensions.sql"
+    echo "Processing migration: ${FILENAME}"
+    COUNT=$(${PSQL_BIN} "${DATABASE_URL}" -tAc "SELECT COUNT(1) FROM schema_migrations WHERE filename='${FILENAME}';" || echo "0")
+    if [ "${COUNT}" = "0" ]; then
+      ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "${MIGRATIONS_DIR}/${FILENAME}"
+      ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations (filename) VALUES ('${FILENAME}');"
+      echo " - Applied."
+      APPLIED_COUNT=$((APPLIED_COUNT+1))
+    else
+      echo " - Already applied. Skipping."
+    fi
+  fi
+
+  # Then apply the rest in order, excluding 000_extensions.sql (already handled)
   for f in $(ls -1 ${MIGRATIONS_DIR}/*.sql | sort); do
     FILENAME=$(basename "$f")
+    if [ "${FILENAME}" = "000_extensions.sql" ]; then
+      continue
+    fi
+
     echo "Processing migration: ${FILENAME}"
 
     # Ensure schema_migrations exists
