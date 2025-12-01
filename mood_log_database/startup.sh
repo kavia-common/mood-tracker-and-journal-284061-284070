@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Startup script: start PostgreSQL if needed, ensure DB/user, run migrations, and optionally seed.
+# Startup script: start PostgreSQL if needed, ensure DB/user, run migrations (extensions first), and optionally seed.
 
 # Load env if present
 if [ -f ".env" ]; then
@@ -37,11 +37,9 @@ INITDB_BIN="${PG_BIN:+${PG_BIN}/}initdb"
 
 # Helper to run psql as postgres superuser when local server and we have perms, else via DATABASE_URL
 run_psql_super() {
-  # Try local postgres user
   if id -u postgres >/dev/null 2>&1; then
     sudo -u postgres ${PSQL_BIN} -p "${POSTGRES_PORT}" -d postgres "$@"
   else
-    # Fallback to connection URL if available
     ${PSQL_BIN} "${DATABASE_URL}" "$@"
   fi
 }
@@ -56,7 +54,6 @@ if ! ${PG_ISREADY_BIN} -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" >/dev/null 2>
     fi
     echo "Starting local PostgreSQL server..."
     sudo -u postgres ${POSTGRES_SERVER_BIN} -D /var/lib/postgresql/data -p "${POSTGRES_PORT}" >/tmp/postgres.log 2>&1 &
-    # Wait up to 30 seconds
     for i in {1..30}; do
       if ${PG_ISREADY_BIN} -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" >/dev/null 2>&1; then
         echo "PostgreSQL is ready."
@@ -72,12 +69,10 @@ fi
 # Create DB and user if possible via local superuser; otherwise best effort via URL
 echo "Ensuring database and user exist..."
 if id -u postgres >/dev/null 2>&1; then
-  # Create database
   if ! sudo -u postgres ${PSQL_BIN} -p "${POSTGRES_PORT}" -tAc "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" | grep -q 1; then
     sudo -u postgres ${CREATEDB_BIN} -p "${POSTGRES_PORT}" "${POSTGRES_DB}" || true
   fi
 
-  # Create or alter user and grant privileges
   sudo -u postgres ${PSQL_BIN} -p "${POSTGRES_PORT}" -d postgres <<EOF
 DO \$\$
 BEGIN
@@ -103,15 +98,14 @@ GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO ${POSTGRES_USER};
 EOF
 fi
 
-# Apply migrations idempotently
+# Apply migrations idempotently (extensions first)
 echo "Applying migrations..."
 MIGRATIONS_DIR="migrations"
 APPLIED_COUNT=0
 if [ -d "${MIGRATIONS_DIR}" ]; then
-  # Ensure schema_migrations exists
   ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS schema_migrations (id SERIAL PRIMARY KEY, filename TEXT UNIQUE NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"
 
-  # First, apply 000_extensions.sql if present
+  # Apply 000_extensions.sql first to avoid CITEXT missing errors later
   if [ -f "${MIGRATIONS_DIR}/000_extensions.sql" ]; then
     FILENAME="000_extensions.sql"
     echo "Processing migration: ${FILENAME}"
@@ -126,7 +120,7 @@ if [ -d "${MIGRATIONS_DIR}" ]; then
     fi
   fi
 
-  # Then apply the rest in order, excluding 000_extensions.sql (already handled)
+  # Apply remaining migrations in lexical order excluding extensions file
   for f in $(ls -1 ${MIGRATIONS_DIR}/*.sql | sort); do
     FILENAME=$(basename "$f")
     if [ "${FILENAME}" = "000_extensions.sql" ]; then
@@ -134,18 +128,14 @@ if [ -d "${MIGRATIONS_DIR}" ]; then
     fi
 
     echo "Processing migration: ${FILENAME}"
-
-    # Ensure schema_migrations exists
     ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS schema_migrations (id SERIAL PRIMARY KEY, filename TEXT UNIQUE NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"
 
-    # Check if already applied
     COUNT=$(${PSQL_BIN} "${DATABASE_URL}" -tAc "SELECT COUNT(1) FROM schema_migrations WHERE filename='${FILENAME}';" || echo "0")
     if [ "${COUNT}" != "0" ]; then
       echo " - Already applied. Skipping."
       continue
     fi
 
-    # Run migration
     ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$f"
     ${PSQL_BIN} "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations (filename) VALUES ('${FILENAME}');"
     echo " - Applied."
